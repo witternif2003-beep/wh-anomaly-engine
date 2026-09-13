@@ -1,0 +1,33 @@
+rules:
+  - id: TOR-GATEWAY-001
+    name: Known TOR exit node traffic
+    severity: CRITICAL
+    detection:
+      type: signature
+      source: firewall_log
+      parameters:
+        ioc_type: ip
+        iocs:
+          - 185.220.101.4
+
+  - id: EXFIL-VOLUME-002
+    name: Large outbound transfer spike
+    severity: HIGH
+    detection:
+      type: threshold
+      source: firewall_log
+      parameters:
+        field: bytes
+        threshold: 3
+        window_seconds: 60
+
+  - id: SCAN-FREQ-003
+    name: Port scan frequency per source IP
+    severity: MEDIUM
+    detection:
+      type: custom-frequency
+      source: firewall_log
+      parameters:
+        field: src_ip
+        count_threshold: 5
+        window_seconds: 60
