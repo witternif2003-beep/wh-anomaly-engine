@@ -17,7 +17,8 @@ const VirusTotalClient = require('./virustotalClient');
 const AlertState = require('./alertState');
 const AlertRouter = require('./alertRouter');
 const MemgraphClient = require('./memgraphClient');
-const { initDB, saveAnomaly, getAnomalies, getTotalCount } = require('./persistence');
+const sqlite = require('./persistence');
+const pg = require('./persistencePg');
 const ReportGenerator = require('./reportGenerator');
 
 // ─── Config ───
@@ -314,9 +315,24 @@ async function start() {
   await redisClient.connect();
   console.log('✅ Redis connected');
 
-  // 2. Persistence
-  initDB();
-  console.log('✅ SQLite initialized (WAL mode)');
+  // 2. Persistence — Neon Postgres when DATABASE_URL is set, SQLite (WAL) fallback.
+  // Architecture note: this engine process runs the while(true) stream consumer and
+  // owns the WRITE path, so it must live on a persistent host (VM/container) — Vercel
+  // functions are stateless and short-lived and must never run this loop. Vercel hosts
+  // only the read API (api/index.js) against the same database.
+  const usePg = pg.initDB(); // false when DATABASE_URL is unset
+  if (usePg) {
+    await pg.init().catch(err => console.error('⚠️  Postgres schema init failed:', err.message));
+    console.log('✅ Persistence: Neon Postgres (DATABASE_URL)');
+  } else {
+    sqlite.initDB();
+    console.log('✅ SQLite initialized (WAL mode)');
+  }
+  const store = {
+    async saveAnomaly(a) { return usePg ? pg.saveAnomaly(a) : sqlite.saveAnomaly(a); },
+    async getAnomalies(l) { return usePg ? pg.getAnomalies(l) : sqlite.getAnomalies(l); },
+    async getTotalCount() { return usePg ? pg.getTotalCount() : sqlite.getTotalCount(); }
+  };
 
   // 3. Circuit Breaker
   const circuitBreaker = new AdvancedCircuitBreaker(redisClient);
@@ -383,7 +399,7 @@ async function start() {
       if (await alertState.isCooldownActive(anomaly.ruleId)) return;
 
       anomalyCounter.inc({ severity: anomaly.severity, rule_id: anomaly.ruleId });
-      saveAnomaly(anomaly);
+      store.saveAnomaly(anomaly).catch(err => scout.captureError(err, { context: 'db_write' }));
       broadcast('anomaly', anomaly);
 
       if (graphClient) {
@@ -488,12 +504,12 @@ async function start() {
     res.set('Content-Type', promClient.register.contentType);
     res.end(await promClient.register.metrics());
   });
-  app.get('/api/anomalies', (req, res) => {
+  app.get('/api/anomalies', async (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
-    res.json(getAnomalies(limit));
+    res.json(await store.getAnomalies(limit));
   });
-  app.get('/api/stats', (req, res) => {
-    res.json({ total: getTotalCount(), uptime: process.uptime(), rules: rules.length });
+  app.get('/api/stats', async (req, res) => {
+    res.json({ total: await store.getTotalCount(), uptime: process.uptime(), rules: rules.length });
   });
   app.get('/api/circuit-breakers', async (req, res) => {
     res.json(await circuitBreaker.getStatus());
