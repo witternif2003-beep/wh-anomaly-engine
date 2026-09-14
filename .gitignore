@@ -8,3 +8,4 @@ nohup.out
 *.db-wal
 .env
 p1-rules.yaml
+.vercel
